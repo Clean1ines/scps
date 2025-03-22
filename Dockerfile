@@ -1,27 +1,14 @@
-# Используем официальный образ Go для сборки
-FROM golang:1.18 AS builder
-
-# Устанавливаем рабочую директорию внутри контейнера
+# Dockerfile
+FROM golang:1.20-alpine as builder
 WORKDIR /app
-
-# Копируем файлы go.mod и go.sum для кэширования зависимостей
-COPY go.mod go.sum ./
-RUN go mod download
-
-# Копируем исходный код
 COPY . .
+RUN go mod download
+RUN CGO_ENABLED=0 GOOS=linux go build -a -o bot .
 
-# Собираем бинарник для Linux (OS по умолчанию для Cloud Run)
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o app .
-
-# Второй этап: минимальный образ
 FROM alpine:latest
-
-# Копируем бинарник из этапа сборки
-COPY --from=builder /app/app /app/app
-
-# Определяем порт, на котором будет слушать приложение
-ENV PORT=8080
-
-# Указываем команду для запуска приложения
-ENTRYPOINT ["/app/app"]
+# Устанавливаем необходимые утилиты: ca-certificates и fpcalc (Chromaprint)
+RUN apk --no-cache add ca-certificates fpcalc
+WORKDIR /root/
+COPY --from=builder /app/bot .
+EXPOSE 8080
+CMD ["./bot"]

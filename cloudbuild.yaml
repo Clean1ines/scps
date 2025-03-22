@@ -1,0 +1,9 @@
+steps:
+  - name: 'gcr.io/cloud-builders/go'
+    args: ['mod', 'tidy']
+  - name: 'gcr.io/cloud-builders/go'
+    args: ['build', '-o', 'scps', '.']
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/scps', '.']
+images:
+  - 'gcr.io/$PROJECT_ID/scps'

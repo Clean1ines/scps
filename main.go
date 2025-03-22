@@ -1,3 +1,4 @@
+// main.go
 package main
 
 import (
@@ -6,64 +7,59 @@ import (
 	"os"
 	"time"
 
-	// Импортируем наши локальные модули
-	"./db"
-	"./oauth"
-	"./telegram"
-
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
-	"github.com/joho/godotenv"
+	"github.com/Clean1ines/scps/pkg/logging"
+	"github.com/Clean1ines/scps/pkg/pubsub"
+	"github.com/Clean1ines/scps/pkg/storage"
+	"github.com/Clean1ines/scps/pkg/telegram"
 )
 
-// Инициализация бота и веб-сервера для обработки Telegram апдейтов и OAuth редиректов.
 func main() {
-	// Загружаем переменные окружения из файла .env
-	err := godotenv.Load()
+	// Инициализация Google Cloud Logging для структурированных логов
+	logger, err := logging.InitCloudLogger(os.Getenv("GOOGLE_CLOUD_PROJECT"))
 	if err != nil {
-		log.Println("Ошибка загрузки .env файла, продолжаем с системными переменными")
+		log.Fatalf("Ошибка инициализации Cloud Logging: %v", err)
+	}
+	defer logger.Flush()
+
+	// Инициализация Redis для хранения сессий и кэширования API результатов
+	storage.InitRedis()
+
+	// Инициализация Telegram-бота с заданным токеном
+	telegram.InitBot(os.Getenv("TELEGRAM_BOT_TOKEN"))
+	webhookURL := os.Getenv("WEBHOOK_URL")
+	if webhookURL == "" {
+		logger.StandardLogger().Fatal("WEBHOOK_URL не задан")
+	}
+	if err := telegram.SetWebhook(webhookURL + "/webhook"); err != nil {
+		logger.StandardLogger().Fatalf("Ошибка установки вебхука: %v", err)
 	}
 
-	// Инициализируем соединение с базой данных для хранения сессий
-	err = db.InitDB(os.Getenv("DB_CONNECTION_STRING"))
+	// Инициализация Google Cloud Pub/Sub для асинхронной обработки задач
+	pubsubClient, err := pubsub.InitPubSubClient(os.Getenv("GOOGLE_CLOUD_PROJECT"))
 	if err != nil {
-		log.Fatalf("Ошибка подключения к БД: %v", err)
+		logger.StandardLogger().Fatalf("Ошибка инициализации Pub/Sub: %v", err)
 	}
-	defer db.CloseDB()
+	// Запускаем пул воркеров (например, 5 параллельных)
+	go pubsubClient.StartWorkerPool(5)
 
-	// Инициализируем Telegram-бота с токеном
-	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
-	bot, err := tgbotapi.NewBotAPI(botToken)
-	if err != nil {
-		log.Fatalf("Ошибка инициализации Telegram-бота: %v", err)
-	}
-	bot.Debug = true // В режиме отладки выводим подробную информацию
+	// Регистрируем HTTP-хэндлеры: для Telegram обновлений и OAuth callback’ов
+	http.HandleFunc("/webhook", telegram.WebhookHandler)
+	http.HandleFunc("/spotify/callback", telegram.OAuthCallbackHandler("spotify"))
+	http.HandleFunc("/youtube/callback", telegram.OAuthCallbackHandler("youtube"))
+	http.HandleFunc("/soundcloud/callback", telegram.OAuthCallbackHandler("soundcloud"))
 
-	log.Printf("Запущен Telegram бот: %s", bot.Self.UserName)
-
-	// Запускаем горутину для обработки апдейтов Telegram
-	go telegram.HandleUpdates(bot)
-
-	// Инициализируем OAuth-конфигурацию для Spotify и YouTube
-	oauth.InitOAuthConfig()
-
-	// Запускаем HTTP-сервер для обработки входящих вебхуков и OAuth редиректов
-	http.HandleFunc("/spotifyOAuth", oauth.SpotifyOAuthHandler)
-	http.HandleFunc("/telegramWebhook", telegram.WebhookHandler)
-
-	// Указываем порт, который будет использовать Firebase Cloud Functions (или Cloud Run)
+	// Запуск HTTP-сервера с заданными таймаутами (под Cloud Run)
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080" // Значение по умолчанию
+		port = "8080"
 	}
-
 	srv := &http.Server{
 		Addr:         ":" + port,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 20 * time.Second,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
 	}
-
-	log.Printf("HTTP сервер запущен на порту %s", port)
+	logger.StandardLogger().Printf("Сервер слушает порт %s", port)
 	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("Ошибка запуска HTTP сервера: %v", err)
+		logger.StandardLogger().Fatalf("Ошибка HTTP-сервера: %v", err)
 	}
 }
