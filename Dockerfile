@@ -1,14 +1,14 @@
 # Dockerfile
-FROM golang:1.20-alpine as builder
+FROM golang:1.18 as builder
 WORKDIR /app
+# Копирование всех исходников проекта в контейнер
 COPY . .
-RUN go mod download
-RUN CGO_ENABLED=0 GOOS=linux go build -a -o bot .
-
+# Сборка бинарного файла с именем scps
+RUN go build -o scps .
 FROM alpine:latest
-# Устанавливаем необходимые утилиты: ca-certificates и fpcalc (Chromaprint)
-RUN apk --no-cache add ca-certificates fpcalc
-WORKDIR /root/
-COPY --from=builder /app/bot .
+WORKDIR /app
+# Копирование собранного бинарника из контейнера сборки
+COPY --from=builder /app/scps .
 EXPOSE 8080
-CMD ["./bot"]
+# Запуск приложения при старте контейнера
+CMD ["./scps"]
