@@ -2,21 +2,60 @@
 package logging
 
 import (
-	"cloud.google.com/go/logging"
-	"context"
+    "context"
+    "fmt"
+    "log"
+    "os"
+
+    "cloud.google.com/go/logging"
 )
 
-// Logger – глобальный объект логгера.
-var Logger *logging.Logger
+// Logger представляет обертку для Google Cloud Logging.
+type Logger struct {
+    client  *logging.Client
+    logger  *logging.Logger
+    context context.Context
+}
 
-// InitCloudLogger инициализирует клиента Cloud Logging для проекта.
-func InitCloudLogger(projectID string) (*logging.Logger, error) {
-	ctx := context.Background()
-	client, err := logging.NewClient(ctx, projectID)
-	if err != nil {
-		return nil, err
-	}
-	// Создаем логгер с именем "scps"
-	Logger = client.Logger("scps")
-	return Logger, nil
+// NewLogger создает новый экземпляр Logger, используя переменную окружения GOOGLE_CLOUD_PROJECT.
+func NewLogger(ctx context.Context) (*Logger, error) {
+    projectID := os.Getenv("GOOGLE_CLOUD_PROJECT")
+    if projectID == "" {
+        projectID = "default-project"
+    }
+    client, err := logging.NewClient(ctx, projectID)
+    if err != nil {
+        return nil, err
+    }
+    l := client.Logger("scps")
+    return &Logger{
+        client:  client,
+        logger:  l,
+        context: ctx,
+    }, nil
+}
+
+// Infof записывает информационное сообщение.
+func (l *Logger) Infof(format string, args ...interface{}) {
+    entry := logging.Entry{
+        Severity: logging.Info,
+        Payload:  fmt.Sprintf(format, args...),
+    }
+    l.logger.Log(entry)
+    log.Printf("[INFO] "+format, args...)
+}
+
+// Errorf записывает сообщение об ошибке.
+func (l *Logger) Errorf(format string, args ...interface{}) {
+    entry := logging.Entry{
+        Severity: logging.Error,
+        Payload:  fmt.Sprintf(format, args...),
+    }
+    l.logger.Log(entry)
+    log.Printf("[ERROR] "+format, args...)
+}
+
+// Close закрывает клиента логирования.
+func (l *Logger) Close() {
+    l.client.Close()
 }
