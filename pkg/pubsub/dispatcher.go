@@ -1,77 +1,78 @@
-// pkg/pubsub/dispatcher.go
+// pkg/pubsub/pubsub.go
 package pubsub
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"log"
-	"time"
+    "context"
+    "encoding/json"
+    "fmt"
+    "time"
 
-	"cloud.google.com/go/pubsub"
+    "cloud.google.com/go/pubsub"
+    "github.com/Clean1ines/scps/pkg/logging"
+    "github.com/go-redis/redis/v8"
 )
 
-// PubSubClient инкапсулирует клиента, топик и подписку.
+// PubSubClient оборачивает клиента Pub/Sub и хранит ссылку на Redis.
 type PubSubClient struct {
-	Client       *pubsub.Client
-	Topic        *pubsub.Topic
-	Subscription *pubsub.Subscription
+    client    *pubsub.Client
+    topic     *pubsub.Topic
+    sub       *pubsub.Subscription
+    projectID string
+    redis     *redis.Client
 }
 
-// Task представляет задачу для обработки (например, синхронизация плейлиста).
-type Task struct {
-	UserID      int    `json:"user_id"`
-	PlaylistURL string `json:"playlist_url"`
-	Service     string `json:"service"` // "spotify", "youtube", "soundcloud"
-	Action      string `json:"action"`  // "sync-liked" или "sync-custom"
+// NewPubSubClient создает и инициализирует клиента Pub/Sub.
+func NewPubSubClient(ctx context.Context, projectID string, redisClient *redis.Client) (*PubSubClient, error) {
+    client, err := pubsub.NewClient(ctx, projectID)
+    if err != nil {
+        return nil, err
+    }
+    topic := client.Topic("scps_tasks")
+    sub := client.Subscription("scps_tasks_sub")
+    return &PubSubClient{
+        client:    client,
+        topic:     topic,
+        sub:       sub,
+        projectID: projectID,
+        redis:     redisClient,
+    }, nil
 }
 
-// InitPubSubClient инициализирует клиента Pub/Sub для проекта.
-func InitPubSubClient(projectID string) (*PubSubClient, error) {
-	ctx := context.Background()
-	client, err := pubsub.NewClient(ctx, projectID)
-	if err != nil {
-		return nil, err
-	}
-	topic := client.Topic("playlist-tasks")
-	sub := client.Subscription("playlist-tasks-sub")
-	return &PubSubClient{
-		Client:       client,
-		Topic:        topic,
-		Subscription: sub,
-	}, nil
+// SyncTask описывает задачу синхронизации плейлистов.
+type SyncTask struct {
+    Type              string `json:"type"`
+    SpotifyPlaylistID string `json:"spotify_playlist_id"`
+    YouTubePlaylistID string `json:"youtube_playlist_id"`
+    ChatID            int64  `json:"chat_id"`
 }
 
 // PublishTask публикует задачу в Pub/Sub.
-func (p *PubSubClient) PublishTask(ctx context.Context, task Task) error {
-	data, err := json.Marshal(task)
-	if err != nil {
-		return err
-	}
-	result := p.Topic.Publish(ctx, &pubsub.Message{Data: data})
-	_, err = result.Get(ctx)
-	return err
+func (p *PubSubClient) PublishTask(ctx context.Context, task SyncTask) error {
+    data, err := json.Marshal(task)
+    if err != nil {
+        return err
+    }
+    result := p.topic.Publish(ctx, &pubsub.Message{Data: data})
+    _, err = result.Get(ctx)
+    return err
 }
 
-// StartWorkerPool запускает пул воркеров с заданным числом параллельных задач.
-func (p *PubSubClient) StartWorkerPool(workerCount int) {
-	ctx := context.Background()
-	err := p.Subscription.Receive(ctx, func(ctx context.Context, msg *pubsub.Message) {
-		var task Task
-		if err := json.Unmarshal(msg.Data, &task); err != nil {
-			log.Printf("Ошибка разбора задачи: %v", err)
-			msg.Nack()
-			return
-		}
-		log.Printf("Начало обработки задачи: userID=%d, service=%s, action=%s", task.UserID, task.Service, task.Action)
-		// Здесь должна быть вызвана бизнес-логика обработки задачи.
-		// Например, вызов API‑функций синхронизации.
-		// Эмуляция обработки:
-		time.Sleep(2 * time.Second)
-		log.Printf("Задача для userID=%d успешно обработана", task.UserID)
-		msg.Ack()
-	})
-	if err != nil {
-		log.Printf("Ошибка получения задач из Pub/Sub: %v", err)
-	}
+// updateSyncReport обновляет отчет синхронизации в Redis для пользователя.
+func updateSyncReport(ctx context.Context, r *redis.Client, chatID int64, success bool, errMsg string) {
+    key := fmt.Sprintf("sync_report_%d", chatID)
+    var report struct {
+        SuccessCount int      `json:"success_count"`
+        Errors       []string `json:"errors"`
+    }
+    data, err := r.Get(ctx, key).Result()
+    if err == nil {
+        json.Unmarshal([]byte(data), &report)
+    }
+    if success {
+        report.SuccessCount++
+    } else {
+        report.Errors = append(report.Errors, errMsg)
+    }
+    newData, _ := json.Marshal(report)
+    r.Set(ctx, key, newData, 24*time.Hour)
 }
