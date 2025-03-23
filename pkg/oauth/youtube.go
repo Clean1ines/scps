@@ -2,131 +2,87 @@
 package oauth
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"os"
-	"time"
+    "encoding/json"
+    "fmt"
+    "io/ioutil"
+    "net/http"
+    "time"
 
-	"github.com/Clean1ines/scps/pkg/storage"
+    "github.com/Clean1ines/scps/pkg/logging"
+    "github.com/go-redis/redis/v8"
 )
 
-const youtubeTokenTTL = 24 * time.Hour
+var (
+    youtubeClientID     string
+    youtubeClientSecret string
+    youtubeRedirectURI  string
+    redisYTClient       *redis.Client
+    loggerYT            *logging.Logger
+)
 
-type YouTubeToken struct {
-	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"refresh_token"`
-	ExpiresIn    int       `json:"expires_in"`
-	ExpiresAt    time.Time `json:"-"`
-	TokenType    string    `json:"token_type"`
+const (
+    youtubeTokenURL = "https://oauth2.googleapis.com/token"
+    stateKeyYT      = "youtube_oauth_state:default"
+)
+
+// InitYouTube инициализирует параметры OAuth для YouTube.
+func InitYouTube(clientID, clientSecret, redirectURI string, r *redis.Client, logg *logging.Logger) {
+    youtubeClientID = clientID
+    youtubeClientSecret = clientSecret
+    youtubeRedirectURI = redirectURI
+    redisYTClient = r
+    loggerYT = logg
 }
 
-// ExchangeYouTubeCode обменивает код на токен для YouTube.
-func ExchangeYouTubeCode(code string) (*YouTubeToken, error) {
-	redirectURI := os.Getenv("YOUTUBE_REDIRECT_URI")
-	clientID := os.Getenv("YOUTUBE_CLIENT_ID")
-	clientSecret := os.Getenv("YOUTUBE_CLIENT_SECRET")
-
-	data := url.Values{}
-	data.Set("grant_type", "authorization_code")
-	data.Set("code", code)
-	data.Set("redirect_uri", redirectURI)
-
-	req, err := http.NewRequest("POST", "https://oauth2.googleapis.com/token", bytes.NewBufferString(data.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("YouTube exchange error: %s", body)
-	}
-	var token YouTubeToken
-	if err := json.Unmarshal(body, &token); err != nil {
-		return nil, err
-	}
-	token.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
-	return &token, nil
+// YouTubeCallbackHandler обрабатывает callback от YouTube OAuth.
+func YouTubeCallbackHandler(w http.ResponseWriter, r *http.Request) {
+    ctx := r.Context()
+    state := r.URL.Query().Get("state")
+    expectedState, err := redisYTClient.Get(ctx, stateKeyYT).Result()
+    if err != nil || state != expectedState {
+        http.Error(w, "Неверный state", http.StatusBadRequest)
+        loggerYT.Errorf("YouTube: Неверный state: получено %s, ожидалось %s", state, expectedState)
+        return
+    }
+    code := r.URL.Query().Get("code")
+    token, err := exchangeYouTubeCode(code)
+    if err != nil {
+        http.Error(w, "Ошибка обмена кода на токен", http.StatusInternalServerError)
+        loggerYT.Errorf("YouTube: Ошибка обмена кода: %v", err)
+        return
+    }
+    tokenJSON, _ := json.Marshal(token)
+    redisYTClient.Set(ctx, "youtube_token", tokenJSON, time.Hour)
+    w.Write([]byte("YouTube OAuth успешно завершен"))
 }
 
-// RefreshYouTubeToken обновляет access token YouTube.
-func RefreshYouTubeToken(refreshToken string) (*YouTubeToken, error) {
-	clientID := os.Getenv("YOUTUBE_CLIENT_ID")
-	clientSecret := os.Getenv("YOUTUBE_CLIENT_SECRET")
-	redirectURI := os.Getenv("YOUTUBE_REDIRECT_URI")
-
-	data := url.Values{}
-	data.Set("grant_type", "refresh_token")
-	data.Set("refresh_token", refreshToken)
-	data.Set("client_id", clientID)
-	data.Set("client_secret", clientSecret)
-	data.Set("redirect_uri", redirectURI)
-
-	req, err := http.NewRequest("POST", "https://oauth2.googleapis.com/token", bytes.NewBufferString(data.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("YouTube refresh error: %s", body)
-	}
-	var token YouTubeToken
-	if err := json.Unmarshal(body, &token); err != nil {
-		return nil, err
-	}
-	// Обычно refresh token не меняется
-	token.RefreshToken = refreshToken
-	token.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
-	return &token, nil
-}
-
-// StoreYouTubeToken сохраняет YouTube токен в Redis.
-func StoreYouTubeToken(userID int, token *YouTubeToken) error {
-	key := fmt.Sprintf("youtube_token:%d", userID)
-	data, err := json.Marshal(token)
-	if err != nil {
-		return err
-	}
-	return storage.SetValue(key, data, youtubeTokenTTL)
-}
-
-// GetStoredYouTubeToken получает YouTube токен из Redis и обновляет его при необходимости.
-func GetStoredYouTubeToken(userID int) (*YouTubeToken, error) {
-	key := fmt.Sprintf("youtube_token:%d", userID)
-	data, err := storage.GetValue(key)
-	if err != nil {
-		return nil, err
-	}
-	var token YouTubeToken
-	if err := json.Unmarshal([]byte(data), &token); err != nil {
-		return nil, err
-	}
-	if time.Now().After(token.ExpiresAt) {
-		newToken, err := RefreshYouTubeToken(token.RefreshToken)
-		if err != nil {
-			return nil, err
-		}
-		if err := StoreYouTubeToken(userID, newToken); err != nil {
-			// Здесь можно добавить логирование ошибки
-		}
-		return newToken, nil
-	}
-	return &token, nil
+// exchangeYouTubeCode обменивает код на access_token для YouTube.
+func exchangeYouTubeCode(code string) (map[string]interface{}, error) {
+    req, err := http.NewRequest("POST", youtubeTokenURL, nil)
+    if err != nil {
+        return nil, err
+    }
+    q := req.URL.Query()
+    q.Add("grant_type", "authorization_code")
+    q.Add("code", code)
+    q.Add("redirect_uri", youtubeRedirectURI)
+    q.Add("client_id", youtubeClientID)
+    q.Add("client_secret", youtubeClientSecret)
+    req.URL.RawQuery = q.Encode()
+    req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+    client := &http.Client{}
+    resp, err := client.Do(req)
+    if err != nil {
+        return nil, err
+    }
+    defer resp.Body.Close()
+    bodyBytes, _ := ioutil.ReadAll(resp.Body)
+    var tokenResp map[string]interface{}
+    if err := json.Unmarshal(bodyBytes, &tokenResp); err != nil {
+        return nil, err
+    }
+    if resp.StatusCode >= 300 {
+        return nil, fmt.Errorf("YouTube API вернул ошибку")
+    }
+    return tokenResp, nil
 }
