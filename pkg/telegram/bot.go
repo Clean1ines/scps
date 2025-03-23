@@ -2,236 +2,306 @@
 package telegram
 
 import (
-	"encoding/json"
-	"fmt"
-	"log"
-	"net/http"
-	"strconv"
-	"strings"
-	"time"
+    "context"
+    "encoding/json"
+    "fmt"
+    "strings"
+    "time"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"github.com/Clean1ines/scps/pkg/api"
-	"github.com/Clean1ines/scps/pkg/logging"
-	"github.com/Clean1ines/scps/pkg/pubsub"
-	"github.com/Clean1ines/scps/pkg/storage"
-	"github.com/Clean1ines/scps/pkg/oauth"
+    tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+
+    "github.com/Clean1ines/scps/pkg/logging"
+    "github.com/Clean1ines/scps/pkg/oauth"
+    "github.com/Clean1ines/scps/pkg/pubsub"
+    "github.com/Clean1ines/scps/pkg/sync"
+    "github.com/go-redis/redis/v8"
 )
 
-var bot *tgbotapi.BotAPI
+// Константы состояний диалога
+const (
+    StateIdle           = "idle"
+    StateAwaitSource    = "await_source"  // Ожидание выбора исходного сервиса
+    StateAwaitURL       = "await_url"     // Ожидание ввода URL плейлиста
+    StateAwaitTarget    = "await_target"  // Ожидание выбора целевого сервиса
+    StateSyncInProgress = "sync_in_progress"
+    StateSyncCompleted  = "sync_completed"
+)
 
-// InitBot инициализирует Telegram-бота.
-func InitBot(token string) {
-	var err error
-	bot, err = tgbotapi.NewBotAPI(token)
-	if err != nil {
-		log.Fatalf("Ошибка инициализации Telegram-бота: %v", err)
-	}
-	bot.Debug = false
-	logging.Logger.StandardLogger().Printf("Бот запущен: %s", bot.Self.UserName)
+// SessionKey формирует ключ для хранения сессии пользователя в Redis.
+func SessionKey(chatID int64) string {
+    return fmt.Sprintf("session:%d", chatID)
 }
 
-// SetWebhook устанавливает вебхук для бота.
-func SetWebhook(webhookURL string) error {
-	wh, err := tgbotapi.NewWebhook(webhookURL)
-	if err != nil {
-		return err
-	}
-	_, err = bot.Request(wh)
-	return err
+// Session хранит данные текущей сессии пользователя.
+type Session struct {
+    State          string `json:"state"`
+    SourcePlatform string `json:"source_platform"` // "spotify" или "youtube"
+    PlaylistURL    string `json:"playlist_url"`    // URL исходного плейлиста
+    TargetPlatform string `json:"target_platform"` // "spotify" или "youtube"
 }
 
-// WebhookHandler обрабатывает входящие обновления от Telegram.
-func WebhookHandler(w http.ResponseWriter, r *http.Request) {
-	var update tgbotapi.Update
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
-		http.Error(w, "Bad Request", http.StatusBadRequest)
-		return
-	}
-	if update.CallbackQuery != nil {
-		go handleCallbackQuery(update.CallbackQuery)
-	} else if update.Message != nil {
-		go handleMessage(update.Message)
-	}
-	w.WriteHeader(http.StatusOK)
+// Bot представляет Telegram-бота.
+type Bot struct {
+    api         *tgbotapi.BotAPI
+    redisClient *redis.Client
+    logger      *logging.Logger
+    psClient    *pubsub.PubSubClient
 }
 
-func handleMessage(msg *tgbotapi.Message) {
-	chatID := msg.Chat.ID
-	userID := msg.From.ID
-
-	if msg.IsCommand() {
-		switch msg.Command() {
-		case "start":
-			text := "Привет! Добро пожаловать в SCPS. Выберите источник плейлиста:"
-			reply := tgbotapi.NewMessage(chatID, text)
-			reply.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
-				tgbotapi.NewInlineKeyboardRow(
-					tgbotapi.NewInlineKeyboardButtonData("YouTube Music", "source:youtube"),
-					tgbotapi.NewInlineKeyboardButtonData("Spotify", "source:spotify"),
-					tgbotapi.NewInlineKeyboardButtonData("SoundCloud", "source:soundcloud"),
-				),
-			)
-			bot.Send(reply)
-		default:
-			SendMessage(chatID, "Отправьте URL плейлиста для переноса.")
-		}
-		return
-	}
-	processPlaylistURL(msg)
+// NewBot создает нового Telegram-бота.
+func NewBot(token string, r *redis.Client, logger *logging.Logger, psClient *pubsub.PubSubClient) (*Bot, error) {
+    api, err := tgbotapi.NewBotAPI(token)
+    if err != nil {
+        return nil, err
+    }
+    return &Bot{
+        api:         api,
+        redisClient: r,
+        logger:      logger,
+        psClient:    psClient,
+    }, nil
 }
 
-func handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
-	chatID := cb.Message.Chat.ID
-	userID := cb.From.ID
-	data := cb.Data
-
-	if strings.HasPrefix(data, "source:") {
-		source := strings.TrimPrefix(data, "source:")
-		storage.SetValue(fmt.Sprintf("session:%d:source", userID), source, 30*time.Minute)
-		text := fmt.Sprintf("Источник выбран: %s.\nТеперь выберите целевой сервис:", source)
-		reply := tgbotapi.NewMessage(chatID, text)
-		reply.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
-			tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonData("YouTube Music", "target:youtube"),
-				tgbotapi.NewInlineKeyboardButtonData("Spotify", "target:spotify"),
-				tgbotapi.NewInlineKeyboardButtonData("SoundCloud", "target:soundcloud"),
-			),
-		)
-		bot.Send(reply)
-	} else if strings.HasPrefix(data, "target:") {
-		target := strings.TrimPrefix(data, "target:")
-		storage.SetValue(fmt.Sprintf("session:%d:target", userID), target, 30*time.Minute)
-		text := fmt.Sprintf("Целевой сервис выбран: %s.\nОтправьте URL плейлиста для переноса.", target)
-		SendMessage(chatID, text)
-	}
-	answer := tgbotapi.NewCallback(cb.ID, "")
-	bot.Request(answer)
+// Start запускает получение обновлений от Telegram.
+func (b *Bot) Start() {
+    u := tgbotapi.NewUpdate(0)
+    u.Timeout = 60
+    updates := b.api.GetUpdatesChan(u)
+    for update := range updates {
+        if update.Message != nil {
+            go b.handleMessage(update.Message)
+        }
+        if update.CallbackQuery != nil {
+            go b.handleCallback(update.CallbackQuery)
+        }
+    }
 }
 
-func processPlaylistURL(msg *tgbotapi.Message) {
-	chatID := msg.Chat.ID
-	userID := msg.From.ID
-	playlistURL := msg.Text
-
-	if !isValidURL(playlistURL) {
-		SendMessage(chatID, "Неверный формат URL. Попробуйте снова.")
-		return
-	}
-	source, err := storage.GetValue(fmt.Sprintf("session:%d:source", userID))
-	if err != nil || source == "" {
-		SendMessage(chatID, "Сессия не найдена. Начните с /start")
-		return
-	}
-	target, err := storage.GetValue(fmt.Sprintf("session:%d:target", userID))
-	if err != nil || target == "" {
-		SendMessage(chatID, "Сессия не найдена. Начните с /start")
-		return
-	}
-
-	logging.Logger.StandardLogger().Printf("Начало обработки запроса для userID=%d: source=%s, target=%s, URL=%s", userID, source, target, playlistURL)
-
-	// Если URL содержит слово "liked", считаем, что это лайкнутые треки/видео
-	if isLikedPlaylist(playlistURL) {
-		var err error
-		switch {
-		case source == "spotify" && target == "spotify":
-			err = api.SyncLikedSpotify(userID, playlistURL)
-		case source == "youtube" && target == "youtube":
-			err = api.SyncLikedYouTube(userID, playlistURL)
-		case source == "soundcloud" && target == "soundcloud":
-			err = api.SyncLikedSoundCloud(userID, playlistURL)
-		default:
-			err = fmt.Errorf("неподдерживаемая комбинация сервисов для liked playlist")
-		}
-		if err != nil {
-			SendMessage(chatID, fmt.Sprintf("Ошибка синхронизации: %v", err))
-			logging.Logger.StandardLogger().Printf("Ошибка синхронизации liked для userID=%d: %v", userID, err)
-		} else {
-			SendMessage(chatID, "Синхронизация понравившихся завершена.")
-			logging.Logger.StandardLogger().Printf("Синхронизация liked успешно завершена для userID=%d", userID)
-		}
-	} else {
-		// Для кастомного плейлиста публикуем задачу в очередь Pub/Sub для асинхронной обработки
-		task := pubsub.Task{
-			UserID:      userID,
-			PlaylistURL: playlistURL,
-			Service:     target,
-			Action:      "sync-custom",
-		}
-		// Здесь предполагается, что глобальный Pub/Sub клиент уже инициализирован и его метод PublishTask доступен
-		// Например: pubsubClient.PublishTask(context.Background(), task)
-		SendMessage(chatID, "Ваша задача поставлена в очередь. Результаты синхронизации будут сообщены по завершении.")
-		logging.Logger.StandardLogger().Printf("Задача кастомной синхронизации поставлена в очередь для userID=%d", userID)
-	}
-	storage.DelValue(fmt.Sprintf("session:%d:source", userID))
-	storage.DelValue(fmt.Sprintf("session:%d:target", userID))
-	logging.Logger.StandardLogger().Printf("Завершена обработка запроса для userID=%d", userID)
+// handleMessage обрабатывает входящие сообщения и управляет диалогом.
+func (b *Bot) handleMessage(msg *tgbotapi.Message) {
+    chatID := msg.Chat.ID
+    ctx := msg.Context()
+    session, _ := b.getSession(ctx, chatID)
+    if msg.IsCommand() {
+        switch msg.Command() {
+        case "start":
+            session = &Session{State: StateAwaitSource}
+            b.saveSession(ctx, chatID, session)
+            b.sendSourceSelection(chatID)
+        case "restart":
+            session = &Session{State: StateAwaitSource}
+            b.saveSession(ctx, chatID, session)
+            b.sendSourceSelection(chatID)
+        case "report":
+            b.sendSyncReport(chatID)
+        case "refresh":
+            b.refreshToken(ctx, chatID)
+        default:
+            b.sendText(chatID, "Неизвестная команда. Используйте /start для начала.")
+        }
+        return
+    }
+    // Если сообщение не является командой, обрабатываем его согласно состоянию.
+    switch session.State {
+    case StateAwaitURL:
+        session.PlaylistURL = msg.Text
+        session.State = StateAwaitTarget
+        b.saveSession(ctx, chatID, session)
+        b.sendTargetSelection(chatID)
+    default:
+        b.sendText(chatID, "Пожалуйста, используйте /start для начала работы бота.")
+    }
 }
 
-func isValidURL(s string) bool {
-	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+// handleCallback обрабатывает нажатия на inline-кнопки.
+func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
+    chatID := cb.Message.Chat.ID
+    ctx := context.Background()
+    session, _ := b.getSession(ctx, chatID)
+    data := cb.Data
+    switch session.State {
+    case StateAwaitSource:
+        if data == "source_spotify" || data == "source_youtube" {
+            session.SourcePlatform = strings.TrimPrefix(data, "source_")
+            session.State = StateAwaitURL
+            b.saveSession(ctx, chatID, session)
+            b.sendText(chatID, "Введите URL плейлиста для синхронизации")
+        }
+    case StateAwaitTarget:
+        if data == "target_spotify" || data == "target_youtube" {
+            session.TargetPlatform = strings.TrimPrefix(data, "target_")
+            session.State = StateSyncInProgress
+            b.saveSession(ctx, chatID, session)
+            b.sendText(chatID, "Запуск синхронизации...")
+            go b.runSync(ctx, chatID, session)
+        }
+    case StateSyncCompleted:
+        if data == "restart" {
+            session = &Session{State: StateAwaitSource}
+            b.saveSession(ctx, chatID, session)
+            b.sendSourceSelection(chatID)
+        }
+    default:
+        b.sendText(chatID, "Состояние не определено. Используйте /start для начала.")
+    }
+    callback := tgbotapi.NewCallback(cb.ID, "")
+    b.api.Request(callback)
 }
 
-func isLikedPlaylist(s string) bool {
-	return strings.Contains(strings.ToLower(s), "liked")
+// runSync инициирует двустороннюю синхронизацию плейлистов.
+func (b *Bot) runSync(ctx context.Context, chatID int64, session *Session) {
+    // Извлекаем идентификаторы плейлистов из URL.
+    // Здесь должна быть реализация парсинга URL в соответствии с форматами Spotify и YouTube.
+    // В этой реализации мы просто берем последний сегмент URL.
+    spotifyID := extractPlaylistID(session.PlaylistURL, session.SourcePlatform, "spotify")
+    youtubeID := extractPlaylistID(session.PlaylistURL, session.SourcePlatform, "youtube")
+    // Если исходный сервис совпадает с целевым, обновляется существующий плейлист.
+    if session.TargetPlatform == "spotify" {
+        // Если пользователь выбрал Spotify как целевую платформу, используем spotifyID.
+    } else if session.TargetPlatform == "youtube" {
+        // Если выбран YouTube как целевая, используем youtubeID.
+    }
+    // Формируем задачу синхронизации.
+    task := pubsub.SyncTask{
+        Type:              "sync_playlist",
+        SpotifyPlaylistID: spotifyID,
+        YouTubePlaylistID: youtubeID,
+        ChatID:            chatID,
+    }
+    if err := b.psClient.PublishTask(ctx, task); err != nil {
+        b.logger.Errorf("Ошибка публикации задачи: %v", err)
+        b.sendText(chatID, fmt.Sprintf("Ошибка запуска синхронизации: %v", err))
+        return
+    }
+    b.sendText(chatID, "Синхронизация запущена. По завершении вы получите отчет.")
+    session.State = StateSyncCompleted
+    b.saveSession(ctx, chatID, session)
+    b.sendRestartButton(chatID)
 }
 
-func SendMessage(chatID int64, text string) {
-	msg := tgbotapi.NewMessage(chatID, text)
-	bot.Send(msg)
+// refreshToken обновляет Spotify access_token по команде /refresh.
+func (b *Bot) refreshToken(ctx context.Context, chatID int64) {
+    tokenJSON, err := b.redisClient.Get(ctx, "spotify_token").Result()
+    if err != nil {
+        b.sendText(chatID, "Ошибка получения токена")
+        return
+    }
+    var tokenData map[string]interface{}
+    json.Unmarshal([]byte(tokenJSON), &tokenData)
+    refreshToken, ok := tokenData["refresh_token"].(string)
+    if !ok || refreshToken == "" {
+        b.sendText(chatID, "Нет refresh_token")
+        return
+    }
+    newToken, err := oauth.RefreshSpotifyToken(refreshToken)
+    if err != nil {
+        b.sendText(chatID, "Ошибка обновления токена")
+        return
+    }
+    newJSON, _ := json.Marshal(newToken)
+    b.redisClient.Set(ctx, "spotify_token", newJSON, time.Hour)
+    b.sendText(chatID, "Токен обновлен")
 }
 
-// OAuthCallbackHandler возвращает HTTP-хэндлер для обработки OAuth callback.
-func OAuthCallbackHandler(service string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Получаем code и state, где state содержит userID для защиты CSRF.
-		code := r.URL.Query().Get("code")
-		state := r.URL.Query().Get("state")
-		if code == "" || state == "" {
-			http.Error(w, "Недостаточно параметров", http.StatusBadRequest)
-			return
-		}
-		userID, err := strconv.Atoi(state)
-		if err != nil {
-			http.Error(w, "Неверный state", http.StatusBadRequest)
-			return
-		}
-		switch service {
-		case "spotify":
-			token, err := oauth.ExchangeSpotifyCode(code)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("Ошибка Spotify OAuth: %v", err), http.StatusInternalServerError)
-				return
-			}
-			if err := oauth.StoreSpotifyToken(userID, token); err != nil {
-				http.Error(w, fmt.Sprintf("Ошибка сохранения Spotify токена: %v", err), http.StatusInternalServerError)
-				return
-			}
-		case "youtube":
-			token, err := oauth.ExchangeYouTubeCode(code)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("Ошибка YouTube OAuth: %v", err), http.StatusInternalServerError)
-				return
-			}
-			if err := oauth.StoreYouTubeToken(userID, token); err != nil {
-				http.Error(w, fmt.Sprintf("Ошибка сохранения YouTube токена: %v", err), http.StatusInternalServerError)
-				return
-			}
-		case "soundcloud":
-			token, err := oauth.ExchangeSoundCloudCode(code)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("Ошибка SoundCloud OAuth: %v", err), http.StatusInternalServerError)
-				return
-			}
-			if err := oauth.StoreSoundCloudToken(userID, token); err != nil {
-				http.Error(w, fmt.Sprintf("Ошибка сохранения SoundCloud токена: %v", err), http.StatusInternalServerError)
-				return
-			}
-		default:
-			http.Error(w, "Неизвестный сервис", http.StatusBadRequest)
-			return
-		}
-		w.Write([]byte(fmt.Sprintf("%s OAuth успешно завершён. Вернитесь в Telegram.", service)))
-	}
+// extractPlaylistID извлекает идентификатор плейлиста из URL для данной платформы.
+func extractPlaylistID(url, sourcePlatform, targetPlatform string) string {
+    // Реализация должна учитывать форматы URL Spotify и YouTube.
+    // Здесь просто берется последний сегмент строки.
+    parts := strings.Split(url, "/")
+    if len(parts) > 0 {
+        return parts[len(parts)-1]
+    }
+    return ""
+}
+
+// saveSession сохраняет состояние сессии в Redis.
+func (b *Bot) saveSession(ctx context.Context, chatID int64, session *Session) {
+    data, _ := json.Marshal(session)
+    b.redisClient.Set(ctx, SessionKey(chatID), data, 24*time.Hour)
+}
+
+// getSession получает состояние сессии из Redis.
+func (b *Bot) getSession(ctx context.Context, chatID int64) (*Session, error) {
+    data, err := b.redisClient.Get(ctx, SessionKey(chatID)).Result()
+    if err != nil {
+        return &Session{State: StateIdle}, nil
+    }
+    var session Session
+    if err := json.Unmarshal([]byte(data), &session); err != nil {
+        return &Session{State: StateIdle}, err
+    }
+    return &session, nil
+}
+
+// sendSourceSelection отправляет кнопки для выбора исходного сервиса.
+func (b *Bot) sendSourceSelection(chatID int64) {
+    msg := tgbotapi.NewMessage(chatID, "Выберите источник плейлиста:")
+    buttons := tgbotapi.NewInlineKeyboardMarkup(
+        tgbotapi.NewInlineKeyboardRow(
+            tgbotapi.NewInlineKeyboardButtonData("Spotify", "source_spotify"),
+            tgbotapi.NewInlineKeyboardButtonData("YouTube", "source_youtube"),
+        ),
+    )
+    msg.ReplyMarkup = buttons
+    b.api.Send(msg)
+}
+
+// sendTargetSelection отправляет кнопки для выбора целевого сервиса.
+func (b *Bot) sendTargetSelection(chatID int64) {
+    msg := tgbotapi.NewMessage(chatID, "Выберите целевой сервис для синхронизации:")
+    buttons := tgbotapi.NewInlineKeyboardMarkup(
+        tgbotapi.NewInlineKeyboardRow(
+            tgbotapi.NewInlineKeyboardButtonData("Spotify", "target_spotify"),
+            tgbotapi.NewInlineKeyboardButtonData("YouTube", "target_youtube"),
+        ),
+    )
+    msg.ReplyMarkup = buttons
+    b.api.Send(msg)
+}
+
+// sendRestartButton отправляет кнопку Restart для перезапуска диалога.
+func (b *Bot) sendRestartButton(chatID int64) {
+    msg := tgbotapi.NewMessage(chatID, "Нажмите Restart для перезапуска бота")
+    buttons := tgbotapi.NewInlineKeyboardMarkup(
+        tgbotapi.NewInlineKeyboardRow(
+            tgbotapi.NewInlineKeyboardButtonData("Restart", "restart"),
+        ),
+    )
+    msg.ReplyMarkup = buttons
+    b.api.Send(msg)
+}
+
+// sendText отправляет текстовое сообщение пользователю.
+func (b *Bot) sendText(chatID int64, text string) {
+    msg := tgbotapi.NewMessage(chatID, text)
+    b.api.Send(msg)
+}
+
+// sendSyncReport получает отчет синхронизации из Redis и отправляет его пользователю.
+func (b *Bot) sendSyncReport(chatID int64) {
+    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+    defer cancel()
+    key := fmt.Sprintf("sync_report_%d", chatID)
+    data, err := b.redisClient.Get(ctx, key).Result()
+    if err != nil {
+        b.logger.Errorf("Не удалось получить отчет: %v", err)
+        b.sendText(chatID, "Отчет не найден")
+        return
+    }
+    var report SyncReport
+    if err := json.Unmarshal([]byte(data), &report); err != nil {
+        b.logger.Errorf("Ошибка разбора отчета: %v", err)
+        b.sendText(chatID, "Ошибка формирования отчета")
+        return
+    }
+    msgText := fmt.Sprintf("Синхронизация завершена.\nДобавлено на Spotify: %d треков\nДобавлено на YouTube: %d треков\n", report.SuccessCount, report.SuccessCount)
+    if len(report.Errors) == 0 {
+        msgText += "Ошибок не обнаружено."
+    } else {
+        msgText += "Ошибки:\n"
+        for _, errMsg := range report.Errors {
+            msgText += "- " + errMsg + "\n"
+        }
+    }
+    b.sendText(chatID, msgText)
 }
