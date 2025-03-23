@@ -2,132 +2,135 @@
 package oauth
 
 import (
-	"bytes"
-	"context"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"net/url"
-	"os"
-	"time"
+    "context"
+    "crypto/rand"
+    "encoding/base64"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io/ioutil"
+    "net/http"
+    "time"
 
-	"github.com/Clean1ines/scps/pkg/storage"
+    "github.com/Clean1ines/scps/pkg/logging"
+    "github.com/go-redis/redis/v8"
 )
 
-const spotifyTokenTTL = 24 * time.Hour
+var (
+    spotifyClientID     string
+    spotifyClientSecret string
+    spotifyRedirectURI  string
+    redisClient         *redis.Client
+    logger              *logging.Logger
+)
 
-type SpotifyToken struct {
-	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"refresh_token"`
-	ExpiresIn    int       `json:"expires_in"`
-	ExpiresAt    time.Time `json:"-"`
-	TokenType    string    `json:"token_type"`
+const (
+    spotifyTokenURL = "https://accounts.spotify.com/api/token"
+    stateKeyPrefix  = "spotify_oauth_state:"
+)
+
+// generateState генерирует уникальное значение state для конкретного пользователя и сохраняет его в Redis.
+func generateState(ctx context.Context, userID string) (string, error) {
+    b := make([]byte, 16)
+    if _, err := rand.Read(b); err != nil {
+        return "", err
+    }
+    state := base64.URLEncoding.EncodeToString(b)
+    key := stateKeyPrefix + userID
+    if err := redisClient.Set(ctx, key, state, 10*time.Minute).Err(); err != nil {
+        return "", err
+    }
+    return state, nil
 }
 
-// ExchangeSpotifyCode обменивает код на токен.
-func ExchangeSpotifyCode(code string) (*SpotifyToken, error) {
-	redirectURI := os.Getenv("SPOTIFY_REDIRECT_URI")
-	clientID := os.Getenv("SPOTIFY_CLIENT_ID")
-	clientSecret := os.Getenv("SPOTIFY_CLIENT_SECRET")
-
-	data := url.Values{}
-	data.Set("grant_type", "authorization_code")
-	data.Set("code", code)
-	data.Set("redirect_uri", redirectURI)
-
-	req, err := http.NewRequest("POST", "https://accounts.spotify.com/api/token", bytes.NewBufferString(data.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	auth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", clientID, clientSecret)))
-	req.Header.Add("Authorization", "Basic "+auth)
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("spotify exchange error: %s", body)
-	}
-	var token SpotifyToken
-	if err := json.Unmarshal(body, &token); err != nil {
-		return nil, err
-	}
-	token.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
-	return &token, nil
+// InitSpotify инициализирует параметры OAuth для Spotify.
+func InitSpotify(clientID, clientSecret, redirectURI string, r *redis.Client, logg *logging.Logger) {
+    spotifyClientID = clientID
+    spotifyClientSecret = clientSecret
+    spotifyRedirectURI = redirectURI
+    redisClient = r
+    logger = logg
 }
 
-// RefreshSpotifyToken обновляет access_token.
-func RefreshSpotifyToken(refreshToken string) (*SpotifyToken, error) {
-	clientID := os.Getenv("SPOTIFY_CLIENT_ID")
-	clientSecret := os.Getenv("SPOTIFY_CLIENT_SECRET")
-	data := url.Values{}
-	data.Set("grant_type", "refresh_token")
-	data.Set("refresh_token", refreshToken)
-
-	req, err := http.NewRequest("POST", "https://accounts.spotify.com/api/token", bytes.NewBufferString(data.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	auth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", clientID, clientSecret)))
-	req.Header.Add("Authorization", "Basic "+auth)
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("spotify refresh error: %s", body)
-	}
-	var token SpotifyToken
-	if err := json.Unmarshal(body, &token); err != nil {
-		return nil, err
-	}
-	// Обычно refreshToken не меняется
-	token.RefreshToken = refreshToken
-	token.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
-	return &token, nil
+// SpotifyCallbackHandler обрабатывает callback от Spotify OAuth.
+func SpotifyCallbackHandler(w http.ResponseWriter, r *http.Request) {
+    ctx := r.Context()
+    state := r.URL.Query().Get("state")
+    // Фиксированный userID "default" используется для демонстрации.
+    expectedState, err := redisClient.Get(ctx, stateKeyPrefix+"default").Result()
+    if err != nil || state != expectedState {
+        http.Error(w, "Неверный state", http.StatusBadRequest)
+        logger.Errorf("Spotify: Неверный state: получено %s, ожидалось %s", state, expectedState)
+        return
+    }
+    code := r.URL.Query().Get("code")
+    token, err := exchangeSpotifyCode(code)
+    if err != nil {
+        http.Error(w, "Ошибка обмена кода на токен", http.StatusInternalServerError)
+        logger.Errorf("Spotify: Ошибка обмена кода: %v", err)
+        return
+    }
+    tokenJSON, _ := json.Marshal(token)
+    redisClient.Set(ctx, "spotify_token", tokenJSON, time.Hour)
+    w.Write([]byte("Spotify OAuth успешно завершен"))
 }
 
-// StoreSpotifyToken сохраняет токен в Redis.
-func StoreSpotifyToken(userID int, token *SpotifyToken) error {
-	key := fmt.Sprintf("spotify_token:%d", userID)
-	data, err := json.Marshal(token)
-	if err != nil {
-		return err
-	}
-	return storage.SetValue(key, data, spotifyTokenTTL)
+// exchangeSpotifyCode обменивает код на access_token.
+func exchangeSpotifyCode(code string) (map[string]interface{}, error) {
+    req, err := http.NewRequest("POST", spotifyTokenURL, nil)
+    if err != nil {
+        return nil, err
+    }
+    q := req.URL.Query()
+    q.Add("grant_type", "authorization_code")
+    q.Add("code", code)
+    q.Add("redirect_uri", spotifyRedirectURI)
+    req.URL.RawQuery = q.Encode()
+    req.SetBasicAuth(spotifyClientID, spotifyClientSecret)
+    req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+    client := &http.Client{}
+    resp, err := client.Do(req)
+    if err != nil {
+        return nil, err
+    }
+    defer resp.Body.Close()
+    bodyBytes, _ := ioutil.ReadAll(resp.Body)
+    var tokenResp map[string]interface{}
+    if err := json.Unmarshal(bodyBytes, &tokenResp); err != nil {
+        return nil, err
+    }
+    if resp.StatusCode >= 300 {
+        return nil, errors.New("Spotify API вернул ошибку")
+    }
+    return tokenResp, nil
 }
 
-// GetStoredSpotifyToken получает токен из Redis и обновляет его при необходимости.
-func GetStoredSpotifyToken(userID int) (*SpotifyToken, error) {
-	key := fmt.Sprintf("spotify_token:%d", userID)
-	data, err := storage.GetValue(key)
-	if err != nil {
-		return nil, err
-	}
-	var token SpotifyToken
-	if err := json.Unmarshal([]byte(data), &token); err != nil {
-		return nil, err
-	}
-	if time.Now().After(token.ExpiresAt) {
-		newToken, err := RefreshSpotifyToken(token.RefreshToken)
-		if err != nil {
-			return nil, err
-		}
-		if err := StoreSpotifyToken(userID, newToken); err != nil {
-			// Логирование обновления токена через Cloud Logging можно добавить здесь
-		}
-		return newToken, nil
-	}
-	return &token, nil
+// RefreshSpotifyToken обновляет access_token с использованием refresh_token.
+func RefreshSpotifyToken(refreshToken string) (map[string]interface{}, error) {
+    req, err := http.NewRequest("POST", spotifyTokenURL, nil)
+    if err != nil {
+        return nil, err
+    }
+    q := req.URL.Query()
+    q.Add("grant_type", "refresh_token")
+    q.Add("refresh_token", refreshToken)
+    q.Add("redirect_uri", spotifyRedirectURI)
+    req.URL.RawQuery = q.Encode()
+    req.SetBasicAuth(spotifyClientID, spotifyClientSecret)
+    req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+    client := &http.Client{}
+    resp, err := client.Do(req)
+    if err != nil {
+        return nil, err
+    }
+    defer resp.Body.Close()
+    bodyBytes, _ := ioutil.ReadAll(resp.Body)
+    var tokenResp map[string]interface{}
+    if err := json.Unmarshal(bodyBytes, &tokenResp); err != nil {
+        return nil, err
+    }
+    if resp.StatusCode >= 300 {
+        return nil, errors.New("Spotify API вернул ошибку при обновлении токена")
+    }
+    return tokenResp, nil
 }
