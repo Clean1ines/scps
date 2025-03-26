@@ -49,3 +49,11 @@ func DelValue(key string) error {
 	defer cancel()
 	return Client.Del(ctx, key).Err()
 }
+
+// Add Transaction support
+func Transaction(fn func() error) error {
+	ctx := context.Background()
+	return Client.Watch(ctx, func(tx *redis.Tx) error {
+		return fn()
+	})
+}

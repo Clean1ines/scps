@@ -17,12 +17,13 @@ type PubSubClient struct {
 	Subscription *pubsub.Subscription
 }
 
-// Task представляет задачу для обработки (например, синхронизация плейлиста).
+// Task represents a background task for playlist synchronization
 type Task struct {
-	UserID      int    `json:"user_id"`
-	PlaylistURL string `json:"playlist_url"`
-	Service     string `json:"service"` // "spotify", "youtube", "soundcloud"
-	Action      string `json:"action"`  // "sync-liked" или "sync-custom"
+	UserID        int64
+	PlaylistURL   string
+	SourceService string
+	TargetService string
+	Action        string
 }
 
 // InitPubSubClient инициализирует клиента Pub/Sub для проекта.
@@ -39,6 +40,12 @@ func InitPubSubClient(projectID string) (*PubSubClient, error) {
 		Topic:        topic,
 		Subscription: sub,
 	}, nil
+}
+
+// PublishTask publishes a task to Pub/Sub
+func PublishTask(task Task) error {
+	// TODO: Implement actual publishing
+	return nil
 }
 
 // PublishTask публикует задачу в Pub/Sub.
@@ -62,7 +69,7 @@ func (p *PubSubClient) StartWorkerPool(workerCount int) {
 			msg.Nack()
 			return
 		}
-		log.Printf("Начало обработки задачи: userID=%d, service=%s, action=%s", task.UserID, task.Service, task.Action)
+		log.Printf("Начало обработки задачи: userID=%d, source=%s, target=%s", task.UserID, task.SourceService, task.TargetService)
 		// Здесь должна быть вызвана бизнес-логика обработки задачи.
 		// Например, вызов API‑функций синхронизации.
 		// Эмуляция обработки:

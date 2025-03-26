@@ -85,7 +85,7 @@ func RecognizeMusicFromFile(filePath string) (*AcoustIDResponse, error) {
 	}
 	var acoustidResp AcoustIDResponse
 	if err := json.Unmarshal(body, &acoustidResp); err != nil {
-		return nil, fmt.Errorf("AcoustID unmarshal error: %v", err)
+		return nil, fmt.Errorf("AcoustID unmarshal error: %v, body: %s", err, body)
 	}
 	return &acoustidResp, nil
 }

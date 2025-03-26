@@ -28,6 +28,24 @@ type Video struct {
 	PublishedAt string
 }
 
+// YouTubeVideoDetails represents YouTube-specific video metadata
+type YouTubeVideoDetails struct {
+	VideoID      string
+	Title        string
+	ChannelTitle string
+	Duration     int // in seconds
+	CategoryID   string
+}
+
+func (v YouTubeVideoDetails) ToTrack() Track {
+	return Track{
+		ID:       v.VideoID,
+		Title:    v.Title,
+		Artist:   v.ChannelTitle,
+		Duration: v.Duration,
+	}
+}
+
 // GetYouTubePlaylistVideos получает все видео из плейлиста с полной обработкой пагинации.
 func GetYouTubePlaylistVideos(token *oauth.YouTubeToken, playlistID string) ([]Video, error) {
 	cacheKey := fmt.Sprintf("youtube_playlist:%s", playlistID)
@@ -50,8 +68,8 @@ func GetYouTubePlaylistVideos(token *oauth.YouTubeToken, playlistID string) ([]V
 	params.Set("part", "snippet,contentDetails")
 	params.Set("maxResults", "50")
 
-	// Функция для запроса одной страницы
-	fetchPage := func(pt string) error {
+	var fetchPage func(string) error
+	fetchPage = func(pt string) error {
 		defer wg.Done()
 		ytSem <- struct{}{}
 		defer func() { <-ytSem }()

@@ -14,17 +14,16 @@ import (
 	"github.com/Clean1ines/scps/pkg/storage"
 )
 
+// Use Track from interface.go
+// Remove local Track struct definition
+
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 var sem = make(chan struct{}, 5) // Ограничение параллельных запросов
 
-// Track представляет расширенные метаданные трека.
-type Track struct {
-	URI         string
-	Title       string
-	Artist      string
-	Duration    int // секунды
-	Album       string
-	ReleaseYear string
+type PlaylistMetadata struct {
+	LastSyncedHash string
+	LastSyncTime   time.Time
+	TrackCount     int
 }
 
 // GetSpotifyPlaylistTracksAsync получает треки плейлиста с пагинацией, параллельно и кэшированием.
@@ -110,14 +109,14 @@ func GetSpotifyPlaylistTracksAsync(token *oauth.SpotifyToken, playlistID string)
 					}
 					artistNames += a.Name
 				}
-				localTracks = append(localTracks, Track{
-					URI:         item.Track.URI,
-					Title:       item.Track.Name,
-					Artist:      artistNames,
-					Duration:    item.Track.Duration / 1000,
-					Album:       item.Track.Album.Name,
-					ReleaseYear: extractYear(item.Track.Album.ReleaseDate),
-				})
+				localTracks = append(localTracks, createTrackFromSpotify(
+					item.Track.URI,
+					item.Track.Name,
+					artistNames,
+					item.Track.Duration/1000,
+					item.Track.Album.Name,
+					extractYear(item.Track.Album.ReleaseDate),
+				))
 			}
 			mu.Lock()
 			tracks = append(tracks, localTracks...)
@@ -141,6 +140,20 @@ func extractYear(dateStr string) string {
 
 // AddTracksToSpotifyPlaylist добавляет треки в указанный плейлист пакетами.
 func AddTracksToSpotifyPlaylist(token *oauth.SpotifyToken, playlistID string, tracks []Track) error {
+	// First clear existing tracks
+	req, _ := http.NewRequest("PUT", fmt.Sprintf("https://api.spotify.com/v1/playlists/%s/tracks", playlistID), bytes.NewReader([]byte(`{"uris":[]}`)))
+	req.Header.Add("Authorization", "Bearer "+token.AccessToken)
+	req.Header.Add("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("error clearing playlist: %d", resp.StatusCode)
+	}
+
+	// Then add tracks in batches
 	batchSize := 100
 	for i := 0; i < len(tracks); i += batchSize {
 		end := i + batchSize
@@ -170,4 +183,15 @@ func AddTracksToSpotifyPlaylist(token *oauth.SpotifyToken, playlistID string, tr
 		time.Sleep(200 * time.Millisecond)
 	}
 	return nil
+}
+
+func createTrackFromSpotify(uri, title, artist string, duration int, album, releaseYear string) Track {
+	return Track{
+		URI:         uri,
+		Title:       title,
+		Artist:      artist,
+		Duration:    duration,
+		Album:       album,
+		ReleaseYear: releaseYear,
+	}
 }

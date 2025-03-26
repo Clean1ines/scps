@@ -10,11 +10,12 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/Clean1ines/scps/pkg/api/client"
 	"github.com/Clean1ines/scps/pkg/oauth"
 	"github.com/Clean1ines/scps/pkg/storage"
 )
 
-var scClient = &http.Client{Timeout: 10 * time.Second}
+var scClient = client.New(client.DefaultConcurrencyLimit)
 
 // TrackSC представляет данные трека SoundCloud.
 type TrackSC struct {
@@ -30,17 +31,18 @@ func ResolveSoundCloudURL(oauthToken, originalURL string) (string, error) {
 	resolveURL := "https://api.soundcloud.com/resolve"
 	params := url.Values{}
 	params.Set("url", originalURL)
-	params.Set("client_id", oauthToken) // Зачастую SoundCloud использует client_id для разрешения, но можно передать OAuth токен
-	fullURL := fmt.Sprintf("%s?%s", resolveURL, params.Encode())
-	resp, err := scClient.Get(fullURL)
+	params.Set("client_id", oauthToken)
+
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%s?%s", resolveURL, params.Encode()), nil)
+	resp, body, err := scClient.Do(req)
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("ошибка разрешения SoundCloud URL: %s", body)
 	}
+
 	var result struct {
 		ID int `json:"id"`
 	}
@@ -67,7 +69,11 @@ func GetSoundCloudPlaylistTracksAsync(token *oauth.SoundCloudToken, playlistURL 
 	}
 
 	reqURL := fmt.Sprintf("https://api.soundcloud.com/playlists/%s?oauth_token=%s", resolvedID, token.AccessToken)
-	resp, err := scClient.Get(reqURL)
+	req, err := http.NewRequest("GET", reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, _, err := scClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +120,7 @@ func UpdateSoundCloudPlaylist(token *oauth.SoundCloudToken, playlistURL string, 
 		return err
 	}
 	req.Header.Add("Content-Type", "application/json")
-	resp, err := scClient.Do(req)
+	resp, body, err := scClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -124,4 +130,26 @@ func UpdateSoundCloudPlaylist(token *oauth.SoundCloudToken, playlistURL string, 
 		return fmt.Errorf("ошибка обновления плейлиста SoundCloud: %s", body)
 	}
 	return nil
+}
+
+// Client represents an HTTP client with concurrency control.
+type Client struct {
+	// ...existing fields...
+}
+
+// Get sends a GET request to the specified URL.
+func (c *Client) Get(url string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, _, err := c.Do(req)
+	if httpResp, ok := resp.(*http.Response); ok {
+		return httpResp, err
+	}
+	return nil, fmt.Errorf("invalid response type")
+}
+
+func (c *Client) Do(req *http.Request) (any, any, error) {
+	panic("unimplemented")
 }
