@@ -2,6 +2,8 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -10,47 +12,84 @@ import (
 	"github.com/Clean1ines/scps/pkg/logging"
 	"github.com/Clean1ines/scps/pkg/pubsub"
 	"github.com/Clean1ines/scps/pkg/storage"
+	"github.com/Clean1ines/scps/pkg/telegram"
 	"github.com/Clean1ines/scps/pkg/telegram/setup"
+	"github.com/go-redis/redis/v8"
+	"github.com/joho/godotenv"
 )
 
+var Client *redis.Client
+
+func InitRedis() error {
+	addr := os.Getenv("REDIS_ADDRESS")
+	if addr == "" {
+		return fmt.Errorf("REDIS_ADDRESS environment variable not set")
+	}
+
+	Client = redis.NewClient(&redis.Options{
+		Addr: addr,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := Client.Ping(ctx).Err(); err != nil {
+		return fmt.Errorf("failed to connect to Redis: %v", err)
+	}
+
+	log.Println("Redis connected successfully")
+	return nil
+}
+
 func main() {
+	if err := godotenv.Load(); err != nil {
+		log.Fatal("Error loading .env file")
+	}
+
 	logger, err := logging.InitLogger(os.Getenv("GOOGLE_CLOUD_PROJECT"))
 	if err != nil {
 		log.Fatalf("Failed to initialize logger: %v", err)
 	}
 	defer logger.Flush()
 
-	// Инициализация Redis для хранения сессий и кэширования API результатов
-	storage.InitRedis()
-
-	// Initialize Telegram bot and services
-	if err := setup.InitBot(os.Getenv("TELEGRAM_BOT_TOKEN")); err != nil {
+	if err := telegram.InitBot(os.Getenv("TELEGRAM_BOT_TOKEN")); err != nil {
 		logger.StandardLogger(logging.Error).Fatal(err)
 	}
 
-	// Initialize Pub/Sub
 	pubsubClient, err := pubsub.InitPubSubClient(os.Getenv("GOOGLE_CLOUD_PROJECT"))
 	if err != nil {
-		logger.StandardLogger(logging.Error).Printf("Ошибка инициализации Pub/Sub: %v", err)
-		os.Exit(1)
+		logger.StandardLogger(logging.Error).Fatal(err)
+	}
+	defer pubsubClient.Client.Close()
+
+	telegram.SetPubSubClient(pubsubClient)
+	setup.InitServices(pubsubClient)
+
+	// Initialize Redis once
+	if err := storage.InitRedis(); err != nil {
+		logger.StandardLogger(logging.Error).Fatalf("Failed to initialize Redis: %v", err)
 	}
 
-	// Initialize services and handlers
-	setup.InitServices(pubsubClient)
-	setup.SetupHandlers()
+	// Start worker pool
+	go pubsubClient.StartWorkerPool(5)
 
-	// Запуск HTTP-сервера с заданными таймаутами (под Cloud Run)
+	// Setup webhook
+	webhookURL := os.Getenv("WEBHOOK_URL")
+	if err := telegram.SetWebhook(webhookURL + "/webhook"); err != nil {
+		logger.StandardLogger(logging.Error).Fatal(err)
+	}
+
+	// Setup HTTP handlers
+	mux := http.NewServeMux()
+	setup.SetupHandlers(mux)
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-	srv := &http.Server{
-		Addr:         ":" + port,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-	}
-	logger.StandardLogger(logging.Info).Printf("Сервер слушает порт %s", port)
-	if err := srv.ListenAndServe(); err != nil {
-		logger.StandardLogger(logging.Error).Fatalf("Ошибка HTTP-сервера: %v", err)
+
+	logger.StandardLogger(logging.Info).Printf("Starting server on port %s", port)
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
+		logger.StandardLogger(logging.Error).Fatal(err)
 	}
 }

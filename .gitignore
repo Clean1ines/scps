@@ -46,6 +46,7 @@ build/Release
 
 # Dependency directories
 node_modules/
+vendor/
 
 # Optional npm cache directory
 .npm
@@ -64,6 +65,32 @@ node_modules/
 
 # dotenv environment variables file
 .env
+*.env
+.env.local
 
 # dataconnect generated files
 .dataconnect
+
+# Binaries and objects
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go workspace file
+go.work
+
+# Redis data
+dump.rdb
+
+# Google Cloud credentials
+*.json

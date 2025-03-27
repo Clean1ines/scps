@@ -71,6 +71,10 @@ func (s *PlaylistService) notifyUser(userID int64, message string) {
 	// Реализация зависит от конкретной структуры вашего бота
 }
 
+func (s *PlaylistService) PublishTask(ctx context.Context, task pubsub.Task) error {
+	return s.pubsubClient.PublishTask(ctx, task)
+}
+
 func ProcessPlaylistSync(task pubsub.Task) error {
 	switch task.SourceService {
 	case "spotify":

@@ -6,15 +6,20 @@ import (
 	"time"
 
 	"github.com/Clean1ines/scps/pkg/storage"
+	"github.com/Clean1ines/scps/pkg/telegram/service"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 type CallbackHandler struct {
-	bot *tgbotapi.BotAPI
+	bot         *tgbotapi.BotAPI
+	authService *service.AuthService
 }
 
-func NewCallbackHandler(bot *tgbotapi.BotAPI) *CallbackHandler {
-	return &CallbackHandler{bot: bot}
+func NewCallbackHandler(bot *tgbotapi.BotAPI, authService *service.AuthService) *CallbackHandler {
+	return &CallbackHandler{
+		bot:         bot,
+		authService: authService,
+	}
 }
 
 func (h *CallbackHandler) HandleCallback(cb *tgbotapi.CallbackQuery) {

@@ -19,7 +19,7 @@ func WebhookHandler(bot *tgbotapi.BotAPI, ps *service.PlaylistService, as *servi
 		}
 
 		if update.CallbackQuery != nil {
-			callbackHandler := NewCallbackHandler(bot)
+			callbackHandler := NewCallbackHandler(bot, as)
 			go callbackHandler.HandleCallback(update.CallbackQuery)
 		} else if update.Message != nil {
 			messageHandler := NewMessageHandler(service.NewMessageService(bot, ps, as))

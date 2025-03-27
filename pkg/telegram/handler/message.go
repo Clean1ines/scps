@@ -11,22 +11,18 @@ type MessageHandler struct {
 }
 
 func NewMessageHandler(ms service.MessageService) *MessageHandler {
-	return &MessageHandler{messageService: ms}
+	return &MessageHandler{
+		messageService: ms,
+	}
 }
 
 func (h *MessageHandler) HandleMessage(msg *tgbotapi.Message) {
 	if !middleware.RateLimit(msg.From.ID) {
-		h.messageService.SendErrorMessage(msg.Chat.ID, "Please wait before sending another request")
 		return
 	}
 
 	if msg.IsCommand() {
 		h.handleCommand(msg)
-		return
-	}
-
-	if !middleware.CheckAuth(msg.From.ID) {
-		h.messageService.SendErrorMessage(msg.Chat.ID, "Please authorize first using /start")
 		return
 	}
 

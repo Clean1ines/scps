@@ -17,13 +17,18 @@ type PubSubClient struct {
 	Subscription *pubsub.Subscription
 }
 
+type Client interface {
+	PublishTask(ctx context.Context, task Task) error
+}
+
 // Task represents a background task for playlist synchronization
 type Task struct {
-	UserID        int64
-	PlaylistURL   string
-	SourceService string
-	TargetService string
-	Action        string
+	UserID        int64  `json:"user_id"`
+	ChatID        int64  `json:"chat_id"`
+	SourceService string `json:"source_service"`
+	TargetService string `json:"target_service"`
+	PlaylistURL   string `json:"playlist_url"`
+	Action        string `json:"action"`
 }
 
 // InitPubSubClient инициализирует клиента Pub/Sub для проекта.
@@ -40,12 +45,6 @@ func InitPubSubClient(projectID string) (*PubSubClient, error) {
 		Topic:        topic,
 		Subscription: sub,
 	}, nil
-}
-
-// PublishTask publishes a task to Pub/Sub
-func PublishTask(task Task) error {
-	// TODO: Implement actual publishing
-	return nil
 }
 
 // PublishTask публикует задачу в Pub/Sub.

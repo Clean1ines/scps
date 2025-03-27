@@ -10,6 +10,7 @@ import (
 	"github.com/Clean1ines/scps/pkg/pubsub"
 	"github.com/Clean1ines/scps/pkg/telegram/handler"
 	"github.com/Clean1ines/scps/pkg/telegram/service"
+	"github.com/Clean1ines/scps/pkg/telegram/setup"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
@@ -34,7 +35,6 @@ func SetupHandlers() http.Handler {
 	mux.HandleFunc("/webhook", WebhookHandler)
 	mux.HandleFunc("/spotify/callback", OAuthCallback("spotify"))
 	mux.HandleFunc("/youtube/callback", OAuthCallback("youtube"))
-	mux.HandleFunc("/soundcloud/callback", OAuthCallback("soundcloud"))
 	return mux
 }
 
@@ -45,15 +45,19 @@ func WebhookHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pubsubClient := getPubSubClient() // Implement this helper to reuse client
-	playlistService := service.NewPlaylistService(pubsubClient)
-	authService := service.NewAuthService()
-	messageService := service.NewMessageService(Bot, playlistService, authService)
+	if pubsubClient == nil {
+		http.Error(w, "PubSub client not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	// Use setup package for services
+	setup.InitServices(pubsubClient)
 
 	if update.CallbackQuery != nil {
-		handler := handler.NewCallbackHandler(Bot)
+		handler := handler.NewCallbackHandler(Bot, setup.GetAuthService())
 		go handler.HandleCallback(update.CallbackQuery)
 	} else if update.Message != nil {
+		messageService := service.NewMessageService(Bot, setup.GetPlaylistService(), setup.GetAuthService())
 		handler := handler.NewMessageHandler(messageService)
 		go handler.HandleMessage(update.Message)
 	}

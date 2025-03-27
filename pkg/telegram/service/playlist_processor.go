@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -15,12 +16,14 @@ type Logger interface {
 }
 
 type PlaylistProcessor struct {
-	logger logging.LogEntry
+	logger       logging.LogEntry
+	pubsubClient pubsub.Client
 }
 
-func NewPlaylistProcessor() *PlaylistProcessor {
+func NewPlaylistProcessor(pubsubClient pubsub.Client) *PlaylistProcessor {
 	return &PlaylistProcessor{
-		logger: *logging.DefaultLogger.StandardLogger(logging.Info),
+		logger:       *logging.DefaultLogger.StandardLogger(logging.Info),
+		pubsubClient: pubsubClient,
 	}
 }
 
@@ -60,15 +63,16 @@ func (p *PlaylistProcessor) handleLikedPlaylist(userID int64, source, target, pl
 }
 
 func (p *PlaylistProcessor) handleCustomPlaylist(userID int64, source, target, playlistURL string) error {
+	ctx := context.Background()
 	task := pubsub.Task{
 		UserID:        userID,
-		PlaylistURL:   playlistURL,
 		SourceService: source,
 		TargetService: target,
+		PlaylistURL:   playlistURL,
 		Action:        "sync-custom",
 	}
 
-	return pubsub.PublishTask(task)
+	return p.pubsubClient.PublishTask(ctx, task)
 }
 
 // Вспомогательные методы

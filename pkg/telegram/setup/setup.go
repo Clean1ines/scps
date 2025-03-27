@@ -9,28 +9,31 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-var Bot *tgbotapi.BotAPI
-var authService *service.AuthService
-var playlistService *service.PlaylistService
-
-func InitBot(token string) error {
-	var err error
-	Bot, err = tgbotapi.NewBotAPI(token)
-	if err != nil {
-		return err
-	}
-	Bot.Debug = false
-	return nil
-}
+var (
+	Bot             *tgbotapi.BotAPI
+	authService     *service.AuthService
+	playlistService *service.PlaylistService
+)
 
 func InitServices(client *pubsub.PubSubClient) {
 	authService = service.NewAuthService()
 	playlistService = service.NewPlaylistService(client)
 }
 
-func SetupHandlers() {
-	http.HandleFunc("/webhook", handler.WebhookHandler(Bot, playlistService, authService))
-	http.HandleFunc("/spotify/callback", handler.OAuthCallback(authService))
-	http.HandleFunc("/youtube/callback", handler.OAuthCallback(authService))
-	http.HandleFunc("/soundcloud/callback", handler.OAuthCallback(authService))
+func GetAuthService() *service.AuthService {
+	return authService
+}
+
+func GetPlaylistService() *service.PlaylistService {
+	return playlistService
+}
+
+func SetupHandlers(mux *http.ServeMux) {
+	mux.HandleFunc("/webhook", handler.WebhookHandler(Bot, playlistService, authService))
+	mux.HandleFunc("/spotify/callback", handler.OAuthCallback(authService))
+	mux.HandleFunc("/youtube/callback", handler.OAuthCallback(authService))
+	mux.HandleFunc("/soundcloud/callback", handler.OAuthCallback(authService))
+
+	// Serve WebApp static files
+	mux.Handle("/webapp/", http.StripPrefix("/webapp/", http.FileServer(http.Dir("webapp"))))
 }

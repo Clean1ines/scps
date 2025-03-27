@@ -3,6 +3,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -13,10 +14,10 @@ import (
 var Client *redis.Client
 
 // InitRedis инициализирует подключение к Redis.
-func InitRedis() {
+func InitRedis() error {
 	addr := os.Getenv("REDIS_ADDRESS")
 	if addr == "" {
-		log.Fatal("REDIS_ADDRESS не задан")
+		return fmt.Errorf("REDIS_ADDRESS environment variable not set")
 	}
 	Client = redis.NewClient(&redis.Options{
 		Addr: addr,
@@ -24,9 +25,10 @@ func InitRedis() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := Client.Ping(ctx).Err(); err != nil {
-		log.Fatalf("Ошибка подключения к Redis: %v", err)
+		return fmt.Errorf("failed to connect to Redis: %v", err)
 	}
 	log.Println("Redis подключен")
+	return nil
 }
 
 // SetValue сохраняет значение по ключу с заданным TTL.

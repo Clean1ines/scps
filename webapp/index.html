@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Audi O Shinobu</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        :root {
+            --neon-text-color: rgb(255, 255, 255);
+            --neon-border-color: rgb(205, 87, 3);
+        }
+
+        body {
+            background: #2c013a;
+            color: #17bd32;
+            font-family: 'Cyberpunk', sans-serif;
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            padding: 20px;
+        }
+
+        h1 {
+            font-size: 3em;
+            text-shadow: 0 0 7px var(--neon-text-color),
+                         0 0 10px var(--neon-text-color),
+                         0 0 21px var(--neon-text-color);
+        }
+
+        .start-button {
+            background: transparent;
+            border: 2px solid var(--neon-border-color);
+            color: var(--neon-border-color);
+            padding: 15px 30px;
+            font-size: 1.2em;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            box-shadow: 0 0 10px var(--neon-border-color);
+        }
+
+        .start-button:hover {
+            background: var(--neon-border-color);
+            color: #1a1a1a;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Audi O Shinobu</h1>
+        <p>Your stealthy playlist infiltrator</p>
+        <button onclick="startBot()" class="start-button">le go</button>
+    </div>
+    <script>
+        let tg = window.Telegram.WebApp;
+        
+        function startBot() {
+            tg.sendData("/start");
+            tg.close();
+        }
+
+        tg.expand();
+        tg.enableClosingConfirmation();
+    </script>
+</body>
+</html>
